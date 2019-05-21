@@ -381,8 +381,13 @@ int configurePCI(PCIE_DEV *pcieDev) {
   pcieDev->pShapiHregs = (PCIE_SHAPI_HREGS *)pcieDev->memIO[1].vaddr;
   shapiMagic = ioread32((void *)&pcieDev->pShapiHregs->shapiVersion);
   PDEBUG("shapiVersion Reg 0x%08x\n", shapiMagic);
-  if (shapiMagic != 0x1234)
+  if (shapiMagic != 0x53480100) {
+    printk(KERN_ERR "_pcie: not a SHAPI device  [0x%08X]. Aborting.\n",
+           shapiMagic);
+    for (i = 0; i < NUM_BARS; i++)
+      iounmap(pcieDev->memIO[i].vaddr);
     return -1;
+  }
   pcieDev->pModDmaHregs =
       (SHAPI_MOD_DMA_HREGS *)(pcieDev->memIO[1].vaddr +
                               ioread32((void *)&pcieDev->pShapiHregs

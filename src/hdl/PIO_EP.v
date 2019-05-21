@@ -60,36 +60,42 @@
 
 (* DowngradeIPIdentifiedWarnings = "yes" *)
 module PIO_EP #(
-  parameter C_DATA_WIDTH = 64,            // RX/TX interface data width
+    parameter C_DATA_WIDTH = 64,            // RX/TX interface data width
 
-  // Do not override parameters below this line
-  parameter KEEP_WIDTH = C_DATA_WIDTH / 8,              // TSTRB width
-  parameter TCQ        = 1
+    // Do not override parameters below this line
+    parameter KEEP_WIDTH = C_DATA_WIDTH / 8,              // TSTRB width
+    parameter TCQ        = 1
 ) (
 
-  input                         clk,
-  input                         rst_n,
+    input                         clk,
+    input                         rst_n,
 
-  // AXIS TX
-  input                         s_axis_tx_tready,
-  output  [C_DATA_WIDTH-1:0]    s_axis_tx_tdata,
-  output  [KEEP_WIDTH-1:0]      s_axis_tx_tkeep,
-  output                        s_axis_tx_tlast,
-  output                        s_axis_tx_tvalid,
-  output                        tx_src_dsc,
+    // AXIS TX
+    input                         s_axis_tx_tready,
+    output  [C_DATA_WIDTH-1:0]    s_axis_tx_tdata,
+    output  [KEEP_WIDTH-1:0]      s_axis_tx_tkeep,
+    output                        s_axis_tx_tlast,
+    output                        s_axis_tx_tvalid,
+    output                        tx_src_dsc,
 
-  //AXIS RX
-  input   [C_DATA_WIDTH-1:0]    m_axis_rx_tdata,
-  input   [KEEP_WIDTH-1:0]      m_axis_rx_tkeep,
-  input                         m_axis_rx_tlast,
-  input                         m_axis_rx_tvalid,
-  output                        m_axis_rx_tready,
-  input   [21:0]                m_axis_rx_tuser,
+    input  [5:0]                    tx_buf_av,
 
-  output                        req_compl,
-  output                        compl_done,
+    //AXIS RX
+    input   [C_DATA_WIDTH-1:0]    m_axis_rx_tdata,
+    input   [KEEP_WIDTH-1:0]      m_axis_rx_tkeep,
+    input                         m_axis_rx_tlast,
+    input                         m_axis_rx_tvalid,
+    output                        m_axis_rx_tready,
+    input   [21:0]                m_axis_rx_tuser,
 
-  input   [15:0]                cfg_completer_id
+    output                        req_compl,
+    output                        compl_done,
+
+    input   [15:0]                cfg_completer_id,
+    // ADC Interface
+    input adc_clock,
+    input  clk_100,
+    input [5:0] clk_100_cnt
 );
 
     // Local wires
@@ -118,128 +124,143 @@ module PIO_EP #(
     wire  [7:0]       req_be;
     wire  [12:0]      req_addr;
 
+    wire  [31:0]      dma_host_addr_tx;
+    wire  [5:0]       dma_payload_size_tx;
 
-    //
-    // ENDPOINT MEMORY : 8KB memory aperture implemented in FPGA BlockRAM(*)
-    //
+    wire req_compl_rx, req_compl_wd_rx; //RX -> pci_dma_eng
+    wire [31:0] status_reg, control_reg, dma_host_addr; // From Pcie regs
+    wire [20:0] dma_size_i; // From Pcie regs
+    // for tx_dma engine
+    wire [7:0] dma_status;
+    //wire [5:0] dma_payload_tx;
+    wire [31:0] host_addr_tx;
+    (* mark_debug="yes" *)  wire [63:0] dma_data;
+    wire tlp_start_req;
+    //wire dma_compl_acq;
 
-    PIO_EP_MEM_ACCESS  #(
-       .TCQ( TCQ )
-       ) EP_MEM_inst (
-      
-      .clk(clk),               // I
-      .rst_n(rst_n),           // I
-      
-      // Read Port
-      
-      .rd_addr(rd_addr),     // I [10:0]
-      .rd_be(rd_be),         // I [3:0]
-      .rd_data(rd_data),     // O [31:0]
-      
-      // Write Port
-      
-      .wr_addr(wr_addr),     // I [10:0]
-      .wr_be(wr_be),         // I [7:0]
-      .wr_data(wr_data),     // I [31:0]
-      .wr_en(wr_en),         // I
-      .wr_busy(wr_busy)      // O
-      
-      );
+    assign status_reg ={24'b0, dma_status}; // For now...
+
+    PIO_EP_SHAPI_REGS  #(
+        .TCQ( TCQ )
+    ) EP_REGS_inst (
+
+        .clk(clk),               // I
+        .rst_n(rst_n),           // I
+
+        // Read Port
+
+        .rd_addr(rd_addr),     // I [10:0]
+        .rd_be(rd_be),         // I [3:0]
+        .rd_data(rd_data),     // O [31:0]
+
+        // Write Port
+
+        .wr_addr(wr_addr),     // I [10:0]
+        .wr_be(wr_be),         // I [7:0]
+        .wr_data(wr_data),     // I [31:0]
+        .wr_en(wr_en),         // I
+        .wr_busy(wr_busy),      // O
+
+        .status_reg(status_reg),  // I
+        .control_reg(control_reg),
+        .dma_compl_acq(),  // O dma_compl_acq
+        .dma_size(dma_size_i),
+        .dma_host_addr(dma_host_addr)
+    );
 
     //
     // Local-Link Receive Controller
     //
 
-  PIO_RX_ENGINE #(
-    .C_DATA_WIDTH( C_DATA_WIDTH ),
-    .KEEP_WIDTH( KEEP_WIDTH ),
-    .TCQ( TCQ )
+    PIO_RX_ENGINE #(
+        .C_DATA_WIDTH( C_DATA_WIDTH ),
+        .KEEP_WIDTH( KEEP_WIDTH ),
+        .TCQ( TCQ )
 
-  ) EP_RX_inst (
+    ) EP_RX_inst (
 
-    .clk(clk),                              // I
-    .rst_n(rst_n),                          // I
+        .clk(clk),                              // I
+        .rst_n(rst_n),                          // I
 
-    // AXIS RX
-    .m_axis_rx_tdata( m_axis_rx_tdata ),    // I
-    .m_axis_rx_tkeep( m_axis_rx_tkeep ),    // I
-    .m_axis_rx_tlast( m_axis_rx_tlast ),    // I
-    .m_axis_rx_tvalid( m_axis_rx_tvalid ),  // I
-    .m_axis_rx_tready( m_axis_rx_tready ),  // O
-    .m_axis_rx_tuser ( m_axis_rx_tuser ),   // I
+        // AXIS RX
+        .m_axis_rx_tdata( m_axis_rx_tdata ),    // I
+        .m_axis_rx_tkeep( m_axis_rx_tkeep ),    // I
+        .m_axis_rx_tlast( m_axis_rx_tlast ),    // I
+        .m_axis_rx_tvalid( m_axis_rx_tvalid ),  // I
+        .m_axis_rx_tready( m_axis_rx_tready ),  // O
+        .m_axis_rx_tuser ( m_axis_rx_tuser ),   // I
 
-    // Handshake with Tx engine
-    .req_compl(req_compl_int),              // O
-    .req_compl_wd(req_compl_wd),            // O
-    .compl_done(compl_done_int),            // I
+        // Handshake with Tx engine
+        .req_compl(req_compl_int),              // O
+        .req_compl_wd(req_compl_wd),            // O
+        .compl_done(compl_done_int),            // I
 
-    .req_tc(req_tc),                        // O [2:0]
-    .req_td(req_td),                        // O
-    .req_ep(req_ep),                        // O
-    .req_attr(req_attr),                    // O [1:0]
-    .req_len(req_len),                      // O [9:0]
-    .req_rid(req_rid),                      // O [15:0]
-    .req_tag(req_tag),                      // O [7:0]
-    .req_be(req_be),                        // O [7:0]
-    .req_addr(req_addr),                    // O [12:0]
-                                            
-    // Memory Write Port                    
-    .wr_addr(wr_addr),                      // O [10:0]
-    .wr_be(wr_be),                          // O [7:0]
-    .wr_data(wr_data),                      // O [31:0]
-    .wr_en(wr_en),                          // O
-    .wr_busy(wr_busy)                       // I
-                                            
-  );
+        .req_tc(req_tc),                        // O [2:0]
+        .req_td(req_td),                        // O
+        .req_ep(req_ep),                        // O
+        .req_attr(req_attr),                    // O [1:0]
+        .req_len(req_len),                      // O [9:0]
+        .req_rid(req_rid),                      // O [15:0]
+        .req_tag(req_tag),                      // O [7:0]
+        .req_be(req_be),                        // O [7:0]
+        .req_addr(req_addr),                    // O [12:0]
+
+        // Memory Write Port
+        .wr_addr(wr_addr),                      // O [10:0]
+        .wr_be(wr_be),                          // O [7:0]
+        .wr_data(wr_data),                      // O [31:0]
+        .wr_en(wr_en),                          // O
+        .wr_busy(wr_busy)                       // I
+
+    );
 
     //
     // Local-Link Transmit Controller
     //
 
-  PIO_TX_ENGINE #(
-    .C_DATA_WIDTH( C_DATA_WIDTH ),
-    .KEEP_WIDTH( KEEP_WIDTH ),
-    .TCQ( TCQ )
-  )EP_TX_inst(
+    PIO_TX_ENGINE #(
+        .C_DATA_WIDTH( C_DATA_WIDTH ),
+        .KEEP_WIDTH( KEEP_WIDTH ),
+        .TCQ( TCQ )
+    )EP_TX_inst(
 
-    .clk(clk),                                  // I
-    .rst_n(rst_n),                              // I
+        .clk(clk),                                  // I
+        .rst_n(rst_n),                              // I
 
-    // AXIS Tx
-    .s_axis_tx_tready( s_axis_tx_tready ),      // I
-    .s_axis_tx_tdata( s_axis_tx_tdata ),        // O
-    .s_axis_tx_tkeep( s_axis_tx_tkeep ),        // O
-    .s_axis_tx_tlast( s_axis_tx_tlast ),        // O
-    .s_axis_tx_tvalid( s_axis_tx_tvalid ),      // O
-    .tx_src_dsc( tx_src_dsc ),                  // O
+        // AXIS Tx
+        .s_axis_tx_tready( s_axis_tx_tready ),      // I
+        .s_axis_tx_tdata( s_axis_tx_tdata ),        // O
+        .s_axis_tx_tkeep( s_axis_tx_tkeep ),        // O
+        .s_axis_tx_tlast( s_axis_tx_tlast ),        // O
+        .s_axis_tx_tvalid( s_axis_tx_tvalid ),      // O
+        .tx_src_dsc( tx_src_dsc ),                  // O
 
-    // Handshake with Rx engine
-    .req_compl(req_compl_int),                // I
-    .req_compl_wd(req_compl_wd),              // I
-    .compl_done(compl_done_int),                // 0
+        // Handshake with Rx engine
+        .req_compl(req_compl_int),                // I
+        .req_compl_wd(req_compl_wd),              // I
+        .compl_done(compl_done_int),                // 0
 
-    .req_tc(req_tc),                          // I [2:0]
-    .req_td(req_td),                          // I
-    .req_ep(req_ep),                          // I
-    .req_attr(req_attr),                      // I [1:0]
-    .req_len(req_len),                        // I [9:0]
-    .req_rid(req_rid),                        // I [15:0]
-    .req_tag(req_tag),                        // I [7:0]
-    .req_be(req_be),                          // I [7:0]
-    .req_addr(req_addr),                      // I [12:0]
+        .req_tc(req_tc),                          // I [2:0]
+        .req_td(req_td),                          // I
+        .req_ep(req_ep),                          // I
+        .req_attr(req_attr),                      // I [1:0]
+        .req_len(req_len),                        // I [9:0]
+        .req_rid(req_rid),                        // I [15:0]
+        .req_tag(req_tag),                        // I [7:0]
+        .req_be(req_be),                          // I [7:0]
+        .req_addr(req_addr),                      // I [12:0]
 
-    // Read Port
+        // Read Port
 
-    .rd_addr(rd_addr),                        // O [10:0]
-    .rd_be(rd_be),                            // O [3:0]
-    .rd_data(rd_data),                        // I [31:0]
+        .rd_addr(rd_addr),                        // O [10:0]
+        .rd_be(rd_be),                            // O [3:0]
+        .rd_data(rd_data),                        // I [31:0]
 
-    .completer_id(cfg_completer_id)           // I [15:0]
+        .completer_id(cfg_completer_id)           // I [15:0]
 
     );
 
-  assign req_compl  = req_compl_int;
-  assign compl_done = compl_done_int;
+    assign req_compl  = req_compl_int;
+    assign compl_done = compl_done_int;
 
 endmodule // PIO_EP
-

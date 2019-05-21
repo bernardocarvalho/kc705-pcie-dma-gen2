@@ -144,6 +144,26 @@ set_clock_groups -name pcieclkmux -physically_exclusive -group clk_125mhz_mux_x0
 
 set_false_path -from [get_ports sys_rst_n]
 
+################################################################################
+#### 200 MHz input clk on KC705
+################################################################################
+set_property IOSTANDARD LVDS [get_ports clk200_p]
+set_property IOSTANDARD LVDS [get_ports clk200_n]
+set_property LOC AD12 [get_ports clk200_p]
+set_property LOC AD11 [get_ports clk200_n]
+
+create_clock -name clk_200 -period 5 [get_ports clk200_p]
+##############################################################################
+# for BPI MCS File generation (on KC705)
+###############################################################################
+set_property BITSTREAM.CONFIG.BPI_SYNC_MODE Type2 [current_design]
+set_property BITSTREAM.CONFIG.EXTMASTERCCLK_EN div -2 [current_design]
+set_property BITSTREAM.GENERAL.COMPRESS TRUE [current_design]
+set_property BITSTREAM.CONFIG.UNUSEDPIN Pullup [current_design]
+set_property CONFIG_MODE BPI16 [current_design]
+set_property CFGBVS VCCO [current_design]
+set_property CONFIG_VOLTAGE 2.5 [current_design]
+
 ###############################################################################
 # End
 ###############################################################################
